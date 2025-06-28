@@ -1,12 +1,17 @@
 import re
-from datetime import datetime
-from .anomaly_detector import detect_monthly_kpi_anomalies
-from .hypothesis_generator import generate_hypotheses
-from .query_executor import execute_sql_query
 import os
+from datetime import datetime
+from dotenv import load_dotenv
 import pandas as pd
 from sqlparse import parse, tokens
 from openai import OpenAI
+from .anomaly_detector import detect_monthly_kpi_anomalies
+from .hypothesis_generator import generate_hypotheses
+from .query_executor import execute_sql_query
+from .config import SCHEMA_SUMMARY, OUTPUT_CONFIG, ANALYSIS_CONFIG
+
+# Load environment variables
+load_dotenv()
 
 def parse_hypotheses_and_queries_strict(raw_response):
     """
@@ -143,19 +148,7 @@ def fix_group_by_error(query, error_message):
     
     return query
 
-SCHEMA_SUMMARY = """
-Columns:
-- Month: First day of the month (YYYY-MM-DD)
-- Customer: Customer name (NULL if expense)
-- Vendor: Vendor name (NULL if revenue)
-- Account: General Ledger account name
-- Account Sub Type: General Ledger account name    
-- PNL Type: Budget, Forecast, Actual
-- Transaction Type: Invoice, Payment, Refund, etc.
-- Revenue: Total revenue for the month
-- Expense: Total expense for the month
-- Net Revenue: Revenue net of discounts/refunds
-"""
+# SCHEMA_SUMMARY is now imported from config.py
 
 def save_anomalies_to_csv(anomalies_df, entity_type, kpi_column, output_dir="anomalies_output"):
     """
@@ -167,102 +160,168 @@ def save_anomalies_to_csv(anomalies_df, entity_type, kpi_column, output_dir="ano
     anomalies_df.to_csv(filename, index=False)
     print(f"\n[+] Saved anomalies to: {filename}")
 
-def save_markdown_report(content, entity_type, kpi_column, output_dir="output/reports"):
+def save_markdown_report(content, entity_type, kpi_column, output_dir=None):
     """
     Save markdown report with timestamped filename.
     """
+    if output_dir is None:
+        output_dir = OUTPUT_CONFIG['reports_dir']
+
     os.makedirs(output_dir, exist_ok=True)
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     filename = f"{output_dir}/combined_anomalies_report_{entity_type}_{kpi_column}_{timestamp}.md"
-    with open(filename, 'w') as f:
+    with open(filename, 'w', encoding='utf-8') as f:
         f.write(content)
     print(f"\n[+] Saved Combined Anomalies Report to: {filename}")
     return filename
 
 def generate_combined_insight(anomalies_data, kpi_column, entity_type, mindset="growth"):
     """
-    Generate a combined insight report summarizing all anomalies in a business-friendly format.
+    Generate a comprehensive insight report with actual data and numbers.
     """
-    mindset_guidance = {
-        "growth": "Focus on opportunities for expansion and positive outcomes.",
-        "risk": "Focus on potential threats and mitigation strategies.",
-        "efficiency": "Focus on process improvements and cost savings."
-    }
-    
-    mindset_prompt = mindset_guidance.get(mindset.lower(), mindset_guidance["growth"])
-    
-    # Aggregate total change and top contributors
-    total_change = sum(anomaly['row'][kpi_column] * anomaly['row']['pct_change'] for anomaly in anomalies_data)
+    if not anomalies_data:
+        return "## No Anomalies Detected\n\nNo significant anomalies were found in the analysis period."
+
+    # Calculate accurate statistics
     total_value = sum(anomaly['row'][kpi_column] for anomaly in anomalies_data)
-    change_percent = (total_change / total_value) * 100 if total_value else 0
-    
-    # Collect contributors from validation results where supported
-    contributors = {}
+
+    # Get actual entity data with proper calculations
+    entity_details = {}
+    time_periods = set()
+
     for anomaly in anomalies_data:
-        for item in anomaly['validation_results']:
-            if item['result_count'] > 0:
-                amount_match = re.search(r'increased by \$(\d+)', item['hypothesis'])
-                if amount_match:
-                    amount = int(amount_match.group(1))
-                    entity_match = re.search(r'(Account \d+|Vendor \d+|Customer \w+|Transaction Type \w+)', item['hypothesis'])
-                    if entity_match:
-                        entity = entity_match.group(0)
-                        contributors[entity] = contributors.get(entity, 0) + amount
-    
-    # Sort contributors by amount
-    sorted_contributors = sorted(contributors.items(), key=lambda x: x[1], reverse=True)
-    
-    prompt = f"""
-You are a financial analyst tasked with summarizing financial anomalies in {entity_type} data using a {mindset} mindset. 
-{mindset_prompt}
+        row = anomaly['row']
+        entity_name = row.get(entity_type, "Unknown")
+        month = str(row['Month'])[:7]  # YYYY-MM format
+        time_periods.add(month)
 
-**Data Schema**:
-{SCHEMA_SUMMARY}
+        if entity_name not in entity_details:
+            entity_details[entity_name] = {
+                'total_value': 0,
+                'anomalies': [],
+                'months': set()
+            }
 
-**Summary Data**:
-- Total {kpi_column} across anomalies: ${total_value:,.0f}k with a change of ${total_change:,.0f}k ({change_percent:.0f}% vs previous period)
+        entity_details[entity_name]['total_value'] += row[kpi_column]
+        entity_details[entity_name]['months'].add(month)
+        entity_details[entity_name]['anomalies'].append({
+            'month': month,
+            'value': row[kpi_column],
+            'change': row['pct_change'] if pd.notna(row['pct_change']) else 0,
+            'validation_count': len(anomaly.get('validation_results', []))
+        })
 
-**Task**:
-Provide a concise business summary (200-300 words) of the anomalies based on the total value, change, and top contributors from the validation results with . List the main factors driving the change in descending order of impact, including their contribution amounts and percentage increases where available. Avoid technical terms like 'hypothesis' or 'SQL query.' or 'anomaly' Focus on business insights aligned with the {mindset} mindset. Format the response in markdown with:
+    # Sort entities by total value
+    top_entities = sorted(entity_details.items(), key=lambda x: x[1]['total_value'], reverse=True)
 
-1. **Overview**: State the total {kpi_column} and overall change andd also what it chnage with respect to some time period where we have seen change. 
-2. **Key Contributors**: List the top factors contributing to the change with their percentage change in the total value also with with their compare verison witht he verison months ot time perdiod if their is some change seen in that facotr (if available).
-3. **Insights**: Highlight business implications and one actionable recommendation.
+    # Calculate overall statistics
+    total_anomalies = len(anomalies_data)
+    time_span = f"{min(time_periods)} to {max(time_periods)}" if len(time_periods) > 1 else list(time_periods)[0]
 
-Use the schema (e.g.,Account Sub Type, Account, Vendor, Customer, Transaction Type, PNL Type) and validation results to ground the summary, identifying contributors dynamically based on the data.
+    # Calculate average change (weighted by value)
+    weighted_changes = []
+    for anomaly in anomalies_data:
+        row = anomaly['row']
+        if pd.notna(row['pct_change']):
+            weighted_changes.append(row['pct_change'] * row[kpi_column])
+
+    avg_change = (sum(weighted_changes) / total_value) if total_value > 0 and weighted_changes else 0
+
+    # Create detailed breakdown for top entities
+    entity_breakdown = []
+    for i, (entity_name, data) in enumerate(top_entities[:5]):
+        avg_entity_change = sum(a['change'] for a in data['anomalies']) / len(data['anomalies'])
+        entity_breakdown.append({
+            'rank': i + 1,
+            'name': entity_name,
+            'value': data['total_value'],
+            'percentage_of_total': (data['total_value'] / total_value) * 100,
+            'avg_change': avg_entity_change,
+            'anomaly_count': len(data['anomalies']),
+            'months_affected': len(data['months'])
+        })
+
+    # Generate the report using actual data
+    report = f"""## Executive Summary
+
+During the analysis period ({time_span}), we identified **{total_anomalies} significant anomalies** across {entity_type} data, representing a total {kpi_column} of **${total_value:,.0f}** with an average weighted change of **{avg_change:.1%}**.
+
+## Key Anomaly Contributors
+
 """
-    client = OpenAI(api_key="api_key")
-    response = client.chat.completions.create(
-        model="gpt-4.1",
-        messages=[{"role": "user", "content": prompt}]
-    )
-    
-    return response.choices[0].message.content
 
-def run_deepsight_analysis(df, kpi_column, entity_type, mindset="growth"):
+    for entity in entity_breakdown[:3]:
+        report += f"""### {entity['rank']}. {entity['name']}
+- **Total {kpi_column}**: ${entity['value']:,.0f} ({entity['percentage_of_total']:.1f}% of total anomalies)
+- **Average Change**: {entity['avg_change']:.1%}
+- **Anomalies**: {entity['anomaly_count']} occurrences across {entity['months_affected']} months
+
+"""
+
+    # Add validation insights if available
+    validated_insights = []
+    for anomaly in anomalies_data[:3]:
+        if anomaly.get('validation_results'):
+            for validation in anomaly['validation_results'][:2]:
+                if validation.get('result_count', 0) > 0:
+                    validated_insights.append(validation.get('hypothesis', 'Validation confirmed'))
+
+    if validated_insights:
+        report += "## Validated Insights\n\n"
+        for i, insight in enumerate(validated_insights[:3], 1):
+            report += f"{i}. {insight}\n"
+        report += "\n"
+
+    # Add business recommendations
+    if avg_change > 0:
+        trend_desc = "positive growth trends"
+        recommendation = f"capitalize on the growth momentum in top-performing {entity_type.lower()}s"
+    else:
+        trend_desc = "concerning decline patterns"
+        recommendation = f"investigate and address the underlying issues affecting {entity_type.lower()} performance"
+
+    report += f"""## Business Insights & Recommendations
+
+The analysis reveals {trend_desc} with {len(top_entities)} {entity_type.lower()}s showing significant variations. The top 3 contributors account for {sum(e['percentage_of_total'] for e in entity_breakdown[:3]):.1f}% of total anomalous {kpi_column}.
+
+**Key Recommendation**: Focus immediate attention on {top_entities[0][0]} and {top_entities[1][0] if len(top_entities) > 1 else 'other top contributors'} to {recommendation}. Implement enhanced monitoring for these entities to detect future anomalies early.
+
+**Next Steps**:
+1. Deep-dive analysis on the top 3 contributors
+2. Establish automated alerts for similar patterns
+3. Review operational processes affecting these entities
+"""
+
+    return report
+
+def run_deepsight_analysis(df, kpi_column, entity_type, mindset=None):
     """
     Run DeepSight analysis with a combined anomalies report in the desired format.
     """
+    if mindset is None:
+        mindset = ANALYSIS_CONFIG['default_mindset']
+
     print(f"\n[+] Running DeepSight analysis on {entity_type} data with {mindset} mindset...")
     result = detect_monthly_kpi_anomalies(df, kpi_column)
     full_df = result['full_df']
     rule_anomalies = result['rule_based_anomalies']
     ml_anomalies = result['ml_based_anomalies']
 
-    output_dir = "output/anomalies"
+    # Use config for output directories
+    output_dir = OUTPUT_CONFIG['anomalies_dir']
     os.makedirs(output_dir, exist_ok=True)
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     filename = f"{output_dir}/flagged_data_{entity_type}_{kpi_column}_{timestamp}.csv"
     full_df.to_csv(filename, index=False)
     print(f"\n[+] Saved full DataFrame to: {filename}")
 
-    log_dir = "output/logs"
+    log_dir = OUTPUT_CONFIG['logs_dir']
     os.makedirs(log_dir, exist_ok=True)
     log_path = f"{log_dir}/deepsight_{entity_type}_{kpi_column}_{timestamp}.log"
 
     anomalies_data = []
 
-    with open(log_path, 'w') as log_file:
+    with open(log_path, 'w', encoding='utf-8') as log_file:
         def log_print(*args):
             line = " ".join(map(str, args)) + "\n"
             print(line.strip())

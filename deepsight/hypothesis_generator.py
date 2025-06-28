@@ -1,8 +1,14 @@
-from openai import OpenAI
 import pandas as pd
+from dotenv import load_dotenv
+from openai import OpenAI
 from .query_executor import execute_sql_query
+from .config import OPENAI_CONFIG, SCHEMA_SUMMARY
 
-client = OpenAI(api_key="api_key")
+# Load environment variables
+load_dotenv()
+
+# Initialize OpenAI client with config
+client = OpenAI(api_key=OPENAI_CONFIG['api_key'])
 
 # Function to get unique values for each column by querying the database
 def get_unique_values_for_columns():
@@ -89,8 +95,10 @@ SELECT ...
 """
     # Call the OpenAI API to generate hypotheses
     response = client.chat.completions.create(
-        model="gpt-4.1",
-        messages=[{"role": "user", "content": prompt}]
+        model=OPENAI_CONFIG['model'],
+        messages=[{"role": "user", "content": prompt}],
+        temperature=OPENAI_CONFIG['temperature'],
+        max_tokens=OPENAI_CONFIG['max_tokens']
     )
 
     return response.choices[0].message.content

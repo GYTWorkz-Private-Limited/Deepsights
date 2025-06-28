@@ -59,7 +59,7 @@ def process_data(df):
     group_cols_c = ['Month', 'Customer']
     group_cols_v = ['Month', 'Vendor']
     group_cols_AS = ['Month', 'Account Sub Type'] if 'Account Sub Type' in df.columns else None
-    group_cols_A = ['Month', 'Account'] if 'Account' in df.columns else None
+    group_cols_A = ['Month', 'Account Sub Type', 'Account'] if 'Account' in df.columns else None
 
     # Initialize DataFrames
     revenue_df = pd.DataFrame()
