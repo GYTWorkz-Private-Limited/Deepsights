@@ -2,12 +2,12 @@ from openai import OpenAI
 import pandas as pd
 from .query_executor import execute_sql_query
 
-client = OpenAI(api_key="Api_Key")
+client = OpenAI(api_key="api_key")
 
 # Function to get unique values for each column by querying the database
 def get_unique_values_for_columns():
     # List of categorical columns to fetch unique values for
-    categorical_columns = ['Customer', 'Vendor', 'Month', 'Transaction Type', 'Account', 'PNL Type']
+    categorical_columns = ['Account Sub Type','Customer', 'Vendor', 'Month', 'Transaction Type', 'Account', 'PNL Type']
     
     unique_values = {}
     
@@ -41,7 +41,8 @@ def generate_hypotheses(row, kpi_name, schema_summary):
                                         for col, values in unique_values.items()])
     
     prompt = f"""
-You are a financial analyst tasked with generating hypotheses for a detected anomaly in financial data. You must adhere strictly to the following instructions to ensure accurate and syntactically correct output:
+You are a financial analyst tasked with generating hypotheses for a detected anomaly in financial data. 
+You must adhere strictly to the following instructions to ensure accurate and syntactically correct output:
 
 KPI: {kpi_name}
 Date: {row['Month']}

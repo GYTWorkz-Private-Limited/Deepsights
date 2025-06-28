@@ -1,6 +1,3 @@
-
-
-#+++++++++####################+++++++++++++++++++++++++++
 import re
 from datetime import datetime
 from .anomaly_detector import detect_monthly_kpi_anomalies
@@ -8,7 +5,6 @@ from .hypothesis_generator import generate_hypotheses
 from .query_executor import execute_sql_query
 import os
 import pandas as pd
-import sys
 from sqlparse import parse, tokens
 from openai import OpenAI
 
@@ -105,36 +101,30 @@ def fix_group_by_error(query, error_message):
     from HAVING to WHERE clause.
     """
     if "must appear in the GROUP BY clause or be used in an aggregate function" in error_message:
-        # Extract the problematic column from the error message
         match = re.search(r'column "([^"]+)" must appear', error_message)
         if not match:
-            return query  # Return original query if column not found
+            return query
         
-        problematic_column = match.group(1)  # e.g., "vw_ai_rpt_pnl.Month"
-        column_name = problematic_column.split('.')[-1]  # Extract just "Month"
+        problematic_column = match.group(1)
+        column_name = problematic_column.split('.')[-1]
         
-        # Find the HAVING clause and move the condition to WHERE
         having_pattern = r'(HAVING\s+)(.*?)(;|\Z)'
         having_match = re.search(having_pattern, query, re.IGNORECASE | re.DOTALL)
         if not having_match:
-            return query  # Return original query if no HAVING clause
+            return query
         
         having_clause = having_match.group(2)
-        # Extract the condition involving the problematic column (e.g., "Month" = '2024-10-01')
         condition_pattern = rf'\b{column_name}\b\s*(=|>|<|>=|<=|!=)\s*\'[^\']+\''
         condition_match = re.search(condition_pattern, having_clause, re.IGNORECASE)
         if not condition_match:
             return query
         
         condition = condition_match.group(0)
-        
-        # Remove the condition from HAVING
         new_having = re.sub(rf'\b{condition}\b(\s*AND\s*)?', '', having_clause, flags=re.IGNORECASE).strip()
         if new_having and not new_having.lower().startswith('and'):
             new_having = f"AND {new_having}"
         new_having = new_having.strip()
         
-        # Add the condition to WHERE clause
         where_pattern = r'(WHERE\s+.*?)(GROUP\s+BY|HAVING|;|\Z)'
         where_match = re.search(where_pattern, query, re.IGNORECASE | re.DOTALL)
         if where_match:
@@ -142,10 +132,8 @@ def fix_group_by_error(query, error_message):
             new_where = f"{where_clause} AND {condition}" if where_clause.lower() != 'where' else f"WHERE {condition}"
             new_query = re.sub(where_pattern, f"{new_where} \\2", query, flags=re.IGNORECASE | re.DOTALL)
         else:
-            # If no WHERE clause, add one before GROUP BY
             new_query = re.sub(r'(FROM\s+.*?)(GROUP\s+BY)', f'\\1 WHERE {condition} \\2', query, flags=re.IGNORECASE | re.DOTALL)
         
-        # Update HAVING clause
         if new_having and new_having != 'AND':
             new_query = re.sub(having_pattern, f'HAVING {new_having}\\3', new_query, flags=re.IGNORECASE | re.DOTALL)
         else:
@@ -161,6 +149,7 @@ Columns:
 - Customer: Customer name (NULL if expense)
 - Vendor: Vendor name (NULL if revenue)
 - Account: General Ledger account name
+- Account Sub Type: General Ledger account name    
 - PNL Type: Budget, Forecast, Actual
 - Transaction Type: Invoice, Payment, Refund, etc.
 - Revenue: Total revenue for the month
@@ -184,83 +173,75 @@ def save_markdown_report(content, entity_type, kpi_column, output_dir="output/re
     """
     os.makedirs(output_dir, exist_ok=True)
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    filename = f"{output_dir}/deepsight_{entity_type}_{kpi_column}_{timestamp}.md"
+    filename = f"{output_dir}/combined_anomalies_report_{entity_type}_{kpi_column}_{timestamp}.md"
     with open(filename, 'w') as f:
         f.write(content)
-    print(f"\n[+] Saved Markdown report to: {filename}")
+    print(f"\n[+] Saved Combined Anomalies Report to: {filename}")
     return filename
 
-def generate_final_insight(anomaly_row, kpi_column, hypotheses_data, mindset="growth"):
+def generate_combined_insight(anomalies_data, kpi_column, entity_type, mindset="growth"):
     """
-    Generate a comprehensive insight report by sending anomaly, hypotheses, explanations, 
-    SQL queries, and complete query results to the LLM, using the specified mindset.
+    Generate a combined insight report summarizing all anomalies in a business-friendly format.
     """
     mindset_guidance = {
-        "growth": "Analyze the anomaly with a growth mindset, focusing on opportunities for expansion, new strategies, and positive outcomes. Highlight how the anomaly could lead to business growth or new market opportunities.",
-        "risk": "Analyze the anomaly with a risk mindset, focusing on potential threats, vulnerabilities, and mitigation strategies. Highlight risks to financial stability or operations and suggest ways to address them.",
-        "efficiency": "Analyze the anomaly with an efficiency mindset, focusing on process improvements, cost savings, and operational streamlining. Highlight ways to optimize resources or improve performance."
+        "growth": "Focus on opportunities for expansion and positive outcomes.",
+        "risk": "Focus on potential threats and mitigation strategies.",
+        "efficiency": "Focus on process improvements and cost savings."
     }
     
     mindset_prompt = mindset_guidance.get(mindset.lower(), mindset_guidance["growth"])
     
+    # Aggregate total change and top contributors
+    total_change = sum(anomaly['row'][kpi_column] * anomaly['row']['pct_change'] for anomaly in anomalies_data)
+    total_value = sum(anomaly['row'][kpi_column] for anomaly in anomalies_data)
+    change_percent = (total_change / total_value) * 100 if total_value else 0
+    
+    # Collect contributors from validation results where supported
+    contributors = {}
+    for anomaly in anomalies_data:
+        for item in anomaly['validation_results']:
+            if item['result_count'] > 0:
+                amount_match = re.search(r'increased by \$(\d+)', item['hypothesis'])
+                if amount_match:
+                    amount = int(amount_match.group(1))
+                    entity_match = re.search(r'(Account \d+|Vendor \d+|Customer \w+|Transaction Type \w+)', item['hypothesis'])
+                    if entity_match:
+                        entity = entity_match.group(0)
+                        contributors[entity] = contributors.get(entity, 0) + amount
+    
+    # Sort contributors by amount
+    sorted_contributors = sorted(contributors.items(), key=lambda x: x[1], reverse=True)
+    
     prompt = f"""
-You are a financial analyst tasked with analyzing a financial anomaly using a {mindset} mindset. 
+You are a financial analyst tasked with summarizing financial anomalies in {entity_type} data using a {mindset} mindset. 
 {mindset_prompt}
 
-**Anomaly Details**:
-- KPI: {kpi_column}
-- Date: {anomaly_row['Month']}
-- Value: {anomaly_row[kpi_column]}
-- Change: {anomaly_row['pct_change']:.2%} compared to rolling average
+**Data Schema**:
+{SCHEMA_SUMMARY}
 
-**Hypotheses and Validation Results**:
-"""
-    for item in hypotheses_data:
-        status = "Supported" if item['result_count'] > 0 else "Not Supported"
-        if isinstance(item['error'], dict) and 'error' in item['error']:
-            status = "Error"
-            query_result = f"Error: {item['error']['error']}"
-        else:
-            query_result = f"{item['result_count']} rows returned: {item['results']}"
-        
-        prompt += f"""
-**Hypothesis #{item['hypothesis_number']}**:
-{item['hypothesis']}
+**Summary Data**:
+- Total {kpi_column} across anomalies: ${total_value:,.0f}k with a change of ${total_change:,.0f}k ({change_percent:.0f}% vs previous period)
 
-**SQL Query**:
-```sql
-{item['query']}
-```
-
-**Validation Result**:
-- Status: {status}
-- Query Output: {query_result}
-"""
-    prompt += f"""
 **Task**:
-Analyze the anomaly by synthesizing *all* query results collectively to provide a cohesive explanation. Do not analyze each hypothesis individually; instead, connect patterns, correlations, or contradictions across all results to determine the likely cause(s) of the anomaly. Use business terms and avoid technical jargon. The report should be structured in markdown with the following sections:
+Provide a concise business summary (200-300 words) of the anomalies based on the total value, change, and top contributors from the validation results with . List the main factors driving the change in descending order of impact, including their contribution amounts and percentage increases where available. Avoid technical terms like 'hypothesis' or 'SQL query.' or 'anomaly' Focus on business insights aligned with the {mindset} mindset. Format the response in markdown with:
 
-1. **Summary**: Briefly describe the anomaly and its significance in the context of the business.
-2. **Analysis**: Provide a comprehensive analysis by combining insights from all query results. Identify patterns or trends across the results (e.g., specific customers, transaction types, or accounts contributing to the anomaly). Highlight any correlations or contradictions that inform the anomaly's cause.
-3. **Likely Cause**: Summarize the most likely cause(s) of the anomaly, supported by the collective evidence from the query results.
-4. **Recommendations**: Provide actionable recommendations aligned with the {mindset} mindset to address the anomaly or leverage it for business advantage.
-5. **Conclusion**: Summarize key findings and suggest next steps for further investigation or action.
+1. **Overview**: State the total {kpi_column} and overall change andd also what it chnage with respect to some time period where we have seen change. 
+2. **Key Contributors**: List the top factors contributing to the change with their percentage change in the total value also with with their compare verison witht he verison months ot time perdiod if their is some change seen in that facotr (if available).
+3. **Insights**: Highlight business implications and one actionable recommendation.
 
-Ensure the analysis is thorough, connects the dots across all query results, and aligns with the {mindset} mindset. Format the response in markdown with clear headings.
-
+Use the schema (e.g.,Account Sub Type, Account, Vendor, Customer, Transaction Type, PNL Type) and validation results to ground the summary, identifying contributors dynamically based on the data.
 """
-    client = OpenAI(api_key="Api_key")
+    client = OpenAI(api_key="api_key")
     response = client.chat.completions.create(
         model="gpt-4.1",
         messages=[{"role": "user", "content": prompt}]
     )
     
-    report_content = response.choices[0].message.content
-    return report_content
+    return response.choices[0].message.content
 
 def run_deepsight_analysis(df, kpi_column, entity_type, mindset="growth"):
     """
-    Run DeepSight analysis on the provided DataFrame with specified mindset.
+    Run DeepSight analysis with a combined anomalies report in the desired format.
     """
     print(f"\n[+] Running DeepSight analysis on {entity_type} data with {mindset} mindset...")
     result = detect_monthly_kpi_anomalies(df, kpi_column)
@@ -278,6 +259,8 @@ def run_deepsight_analysis(df, kpi_column, entity_type, mindset="growth"):
     log_dir = "output/logs"
     os.makedirs(log_dir, exist_ok=True)
     log_path = f"{log_dir}/deepsight_{entity_type}_{kpi_column}_{timestamp}.log"
+
+    anomalies_data = []
 
     with open(log_path, 'w') as log_file:
         def log_print(*args):
@@ -298,39 +281,36 @@ def run_deepsight_analysis(df, kpi_column, entity_type, mindset="growth"):
                 log_print("\nRaw LLM Output:\n", hypotheses)
 
                 sql_queries = parse_hypotheses_and_queries(hypotheses)
-                log_print("SQL Query:", sql_queries)
+                log_print("SQL Queries:", sql_queries)
 
                 if not sql_queries:
                     log_print("⚠️ No SQL queries found in LLM response.")
                     continue
 
-                log_print(f"\n[+] Validating {len(sql_queries)} hypotheses...\n")
+                log_print(f"\n[+] Validating {len(sql_queries)} potential causes...\n")
 
                 validation_results = []
 
                 for item in sql_queries:
-                    log_print(f"\nHypothesis #{item['hypothesis_number']}")
-                    log_print(item['hypothesis'])
+                    log_print(f"\nPotential Cause #{item['hypothesis_number']}: {item['hypothesis']}")
                     log_print("\nSQL Query:")
                     log_print(item['query'])
 
                     clean_query = sanitize_sql_query(item['query'])
                     result = execute_sql_query(clean_query)
 
-                    # Check for GROUP BY-related error and attempt fix
                     if isinstance(result, dict) and 'error' in result and "must appear in the GROUP BY clause or be used in an aggregate function" in result['error']:
                         log_print("⚠️ Detected GROUP BY error, attempting to fix query...")
                         fixed_query = fix_group_by_error(clean_query, result['error'])
                         log_print("Fixed Query:")
                         log_print(fixed_query)
-
-                        # Retry with fixed query
                         result = execute_sql_query(fixed_query)
                         log_print("Retry Result:", result)
 
                     if isinstance(result, dict) and 'error' in result:
-                        log_print("❌ SQL Error:", result['error'])
-                        log_print("Status: ❌ Could not validate hypothesis due to error.\n")
+                        log_print("❌ Error:", result['error'])
+                        log_print("Analysis: Could not validate due to error.")
+                        log_print("Recommendation: Review query for syntax or schema issues.\n")
                         validation_results.append({
                             "hypothesis_number": item['hypothesis_number'],
                             "hypothesis": item['hypothesis'],
@@ -341,10 +321,10 @@ def run_deepsight_analysis(df, kpi_column, entity_type, mindset="growth"):
                         })
                     else:
                         result_count = len(result)
-                        log_print("✅ Query Result Sample:", result[:5])
-                        status = "✅ Supported" if result_count > 0 else "❌ Not Supported"
-                        log_print(f"Status: {status}\n")
-
+                        status = "Supported" if result_count > 0 else "Not Supported"
+                        log_print("✅ Result Sample:", result[:5])
+                        log_print(f"Analysis: {status}. {'Data confirms the cause.' if result_count > 0 else 'No data supports this cause.'}")
+                        log_print(f"Recommendation: {'Investigate further or act on this cause.' if result_count > 0 else 'Explore alternative causes.'}\n")
                         validation_results.append({
                             "hypothesis_number": item['hypothesis_number'],
                             "hypothesis": item['hypothesis'],
@@ -354,11 +334,16 @@ def run_deepsight_analysis(df, kpi_column, entity_type, mindset="growth"):
                             "results": result
                         })
 
-                final_insight = generate_final_insight(row, kpi_column, validation_results, mindset)
-                log_print("\n[+] Final Insight Report from LLM:")
-                log_print(final_insight)
-                log_print("-" * 60)
-                
-                save_markdown_report(final_insight, entity_type, kpi_column)
+                anomalies_data.append({
+                    "row": row,
+                    "validation_results": validation_results
+                })
+
+            if anomalies_data:
+                log_print("\n[+] Generating combined anomalies report...")
+                combined_insight = generate_combined_insight(anomalies_data, kpi_column, entity_type, mindset)
+                log_print("\n[+] Combined Anomalies Report:")
+                log_print(combined_insight)
+                save_markdown_report(combined_insight, entity_type, kpi_column)
         else:
             log_print("[✓] No significant anomalies found.")

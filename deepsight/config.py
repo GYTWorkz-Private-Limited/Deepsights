@@ -1,11 +1,6 @@
 # config.py
 DATABASE_CONFIG = {
-    "host": "",
-    "port":233 ,
-    "database": "ss",
-    "user": "",
-    "password": "",
-    "driver": "org.=.Driver"
+    
 }
 # KPI_THRESHOLDS = {
 #     "Revenue": 0.05, 
