@@ -2,7 +2,7 @@ from openai import OpenAI
 import pandas as pd
 from .query_executor import execute_sql_query
 
-client = OpenAI(api_key="Api_key")
+client = OpenAI(api_key="Api_Key")
 
 # Function to get unique values for each column by querying the database
 def get_unique_values_for_columns():
@@ -41,7 +41,7 @@ def generate_hypotheses(row, kpi_name, schema_summary):
                                         for col, values in unique_values.items()])
     
     prompt = f"""
-You are a financial analyst. You detected the following anomaly:
+You are a financial analyst tasked with generating hypotheses for a detected anomaly in financial data. You must adhere strictly to the following instructions to ensure accurate and syntactically correct output:
 
 KPI: {kpi_name}
 Date: {row['Month']}
@@ -58,29 +58,37 @@ Generate exactly 2 plausible hypotheses for this anomaly.
 For each explanation, provide a corresponding SQL query to validate or disprove it.
 
 Important Instructions:
-- Always use correct column names: Customer, Vendor, Month, Revenue, Expense 
+- Always use correct column names: Customer, Vendor, Month, Revenue, Expense
 - Do NOT use placeholder names like 'CustomerName_C' or 'VendorName_V'
 - Do NOT use column aliases (e.g., Total_Revenue) in GROUP BY or HAVING clauses
+- Unique Values: Use only the unique values provided above for categorical columns (e.g., for Transaction Type, use only 'Revenue' or 'Expense').
+- No Extra Values: Do not introduce values outside the provided unique values (e.g., do not use 'Payment' for Transaction Type).
 - Use realistic values like '{sample_name}' where applicable
 - Wrap identifiers in double quotes if needed by PostgreSQL
 - Format SQL inside triple backticks like:
 ```sql
 SELECT ...
-Only include one SQL query per hypothesis
-Place SQL directly under 'Query:' without extra lines
-Avoid putting explanations inside SQL queries
-Always use the correct view name: vw_ai_rpt_pnl
-Start each query with SELECT
-Avoid using column aliases unless in SELECT clause
-Use subqueries or CTEs if needed for multi-step logic
-- Please don't use the windows function in the having clause and follow the proper rules of SQL query writing 
-Ensure that the SQL queries generated are syntactically correct.
-Avoid errors like "syntax error at or near" by ensuring that generated queries follow correct SQL syntax, especially for complex parts like subqueries, HAVING clauses, or aggregates.
-Avoid errors with functions like COUNT(), AVG(), etc., especially in the HAVING clause.
+```
+- Only include one SQL query per hypothesis
+- Place SQL directly under 'Query:' without extra lines
+- Avoid putting explanations inside SQL queries
+- Always use the correct view name: vw_ai_rpt_pnl
+- Start each query with SELECT
+- Avoid extra text before or after SQL
+- Start each SQL query with SELECT, INSERT, UPDATE, or DELETE
+- Do NOT include comments like "-- This query will..."
+- Avoid using column aliases unless in SELECT clause
+- Use subqueries or CTEs if needed for multi-step logic
+- Restrict Transaction Type values to 'Revenue' or 'Expense' only, as these are the only valid values
+- Use unique values from the provided categorical columns where applicable
+- Ensure that the SQL queries generated are syntactically correct
+- Avoid errors like "syntax error at or near" by ensuring correct SQL syntax, especially for subqueries, HAVING clauses, or aggregates
+- Avoid errors with functions like COUNT(), AVG(), etc., especially in the HAVING clause
+- Do not use window functions in the HAVING clause
 """
     # Call the OpenAI API to generate hypotheses
     response = client.chat.completions.create(
-        model="gpt-4",
+        model="gpt-4.1",
         messages=[{"role": "user", "content": prompt}]
     )
 
